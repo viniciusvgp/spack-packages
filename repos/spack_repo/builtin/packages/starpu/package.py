@@ -96,7 +96,7 @@ class Starpu(AutotoolsPackage):
     depends_on("autoconf", type="build")
     depends_on("automake", type="build")
     depends_on("libtool", type="build")
-    depends_on("py-setuptools", type="build")
+    depends_on("py-setuptools", type=("build", "run"))
     depends_on("m4", type="build")
     depends_on("hwloc")
     depends_on("hwloc+cuda", when="+cuda")
@@ -108,6 +108,10 @@ class Starpu(AutotoolsPackage):
     depends_on("simgrid+smpi", when="+simgrid+mpi")
     depends_on("simgrid+mc", when="+simgridmc")
     depends_on("papi", when="+papi")
+    depends_on("python", type=("build", "link", "run"))
+    depends_on("py-joblib", type=("build", "link", "run"))
+    depends_on("py-cloudpickle", type=("build", "link", "run"))
+    depends_on("py-numpy", type=("build", "link", "run"))
 
     conflicts(
         "+shared", when="+mpi+simgrid", msg="Simgrid MPI cannot be built with a shared library"
@@ -115,6 +119,57 @@ class Starpu(AutotoolsPackage):
 
     conflicts("+papi", when="+simgrid")
     conflicts("~blocking", when="+simgrid")
+
+    def setup_build_environment(self, env):
+        import glob
+        setuptools_prefix = self.spec["py-setuptools"].prefix
+        site_packages = glob.glob(
+            str(setuptools_prefix) + "/lib/python*/site-packages"
+        )
+        for p in site_packages:
+            env.prepend_path("PYTHONPATH", p)
+
+    def patch(self):
+        import glob
+        setuptools_prefix = self.spec["py-setuptools"].prefix
+        site_packages = glob.glob(str(setuptools_prefix) + "/lib/python*/site-packages")
+        pythonpath = ":".join(site_packages)
+        pypath_prefix = "PYTHONPATH=%s:$$PYTHONPATH " % pythonpath
+
+        filter_file(
+            r'LDFLAGS=\$\$\{LDFLAGS/-no-pie/\} \$\(PYTHON\) setup\.py build \$\(PYTHON_SETUP_OPTIONS\)',
+            pypath_prefix + 'LDFLAGS=$${LDFLAGS/-no-pie/} $(PYTHON) setup.py build $(PYTHON_SETUP_OPTIONS)',
+            "starpupy/src/Makefile.in"
+        )
+        filter_file(
+            r'LDFLAGS=\$\$\{LDFLAGS/-no-pie/\} \$\(PYTHON\) setup\.py clean',
+            pypath_prefix + 'LDFLAGS=$${LDFLAGS/-no-pie/} $(PYTHON) setup.py clean',
+            "starpupy/src/Makefile.in"
+        )
+        filter_file(
+            r'\$\(PYTHON\) setup\.py install --prefix',
+            pypath_prefix + '$(PYTHON) setup.py install --prefix',
+            "starpupy/src/Makefile.in"
+        )
+        filter_file(
+            r'\$\(PYTHON\) setup\.py clean -a',
+            pypath_prefix + '$(PYTHON) setup.py clean -a',
+            "starpupy/src/Makefile.in"
+        )
+
+        if self.spec["python"].satisfies("+freethreading"):
+            python = self.spec["python"]
+            libdir = python.prefix.lib
+
+            import glob, os
+
+            libs = glob.glob(os.path.join(libdir, "libpython3.*t.so"))
+            if libs:
+                lib = libs[0]
+                target = os.path.join(libdir, "libpython3.14.so")
+
+                if not os.path.exists(target):
+                    os.symlink(os.path.basename(lib), target)
 
     def autoreconf(self, spec, prefix):
         if not os.path.isfile("./configure"):
@@ -124,7 +179,7 @@ class Starpu(AutotoolsPackage):
     def configure_args(self):
         spec = self.spec
 
-        config_args = ["--disable-build-doc", "--enable-blas-lib=none", "--disable-mlr"]
+        config_args = ["--enable-starpupy", "--disable-build-doc", "--enable-blas-lib=none", "--disable-mlr"]
 
         # add missing lib for simgrid static compilation,
         # already fixed since StarPU 1.2.1
